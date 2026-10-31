@@ -1,0 +1,7 @@
+# Variant: bare AArch64 Image instead of a PE/EFI-stub image.
+# Some vendor ABLs jump straight to the Image header and never go through an
+# EFI entry point, so the MZ header can make the handoff fail silently.
+# CONFIG_EFI is not set
+# CONFIG_EFI_STUB is not set
+# CONFIG_EFI_GENERIC_STUB_INITRD_CMDLINE_LOADER is not set
+# CONFIG_RANDOMIZE_BASE is not set

@@ -19,6 +19,11 @@ on:
         default: sm8250-6.19
         required: false
         type: string
+      variant:
+        description: efi (PE stub) or noefi (bare Image)
+        default: efi
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -82,6 +87,9 @@ jobs:
           cd src
           cp /tmp/armbian/config/kernel/linux-sm8250-edge.config .config
           cat ../mainline/config-fragment >> .config
+          if [ "${{ inputs.variant }}" = "noefi" ]; then
+            cat ../mainline/config-noefi >> .config
+          fi
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
           grep -E '^CONFIG_(FRAMEBUFFER_CONSOLE|VT|DRM_FBDEV_EMULATION|DRM_CLIENT_DEFAULT_FBDEV|DRM_PANEL_NOVATEK_NT36523|BACKLIGHT_KTZ8866|KERNEL_GZIP|ARCH_QCOM|USB_CONFIGFS_ACM)=' .config | sort | tee /tmp/config-report.txt
 
@@ -110,7 +118,7 @@ jobs:
           python3 mainline/pack-bootimg.py \
             --kernel /tmp/kernel-dtb \
             --ramdisk /tmp/initramfs.cpio.gz \
-            --out boot-enuma-mainline.img \
+            --out boot-enuma-mainline-${{ inputs.variant }}.img \
             --cmdline "" \
             | tee /tmp/pack-report.txt
           grep -E '^CONFIG_CMDLINE' src/.config | tee -a /tmp/pack-report.txt
@@ -120,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          cp boot-enuma-mainline.img out/
+          cp boot-enuma-mainline-*.img out/
           cp /tmp/initramfs.cpio.gz out/
           cp src/arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dtb out/
           cp /tmp/patch-report.txt /tmp/config-report.txt /tmp/pack-report.txt /tmp/dtb-head.txt out/
@@ -129,7 +137,7 @@ jobs:
           {
             echo "## enuma mainline probe"
             echo
-            echo "kernel: ${{ inputs.kernel_ref }} + armbian ${{ inputs.patch_set }}"
+            echo "kernel: ${{ inputs.kernel_ref }} + armbian ${{ inputs.patch_set }} variant: ${{ inputs.variant }}"
             echo
             echo '```'
             cat /tmp/patch-report.txt /tmp/config-report.txt /tmp/pack-report.txt
