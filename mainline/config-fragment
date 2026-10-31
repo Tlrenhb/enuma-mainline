@@ -21,10 +21,8 @@ CONFIG_TOUCHSCREEN_NT36523_SPI=y
 
 # The boot header cmdline is empty on this device, so bake the probe cmdline
 # into the kernel and let it override whatever ABL/vendor_boot supplies.
-CONFIG_CMDLINE_BOOL=y
 CONFIG_CMDLINE="console=tty0 rdinit=/init root=/dev/ram0 rw loglevel=8 ignore_loglevel panic=30 fbcon=nodefer"
-CONFIG_CMDLINE_OVERRIDE=y
-CONFIG_CMDLINE_EXTEND=n
+CONFIG_CMDLINE_FORCE=y
 
 CONFIG_KERNEL_GZIP=y
 CONFIG_DEBUG_INFO_NONE=y
