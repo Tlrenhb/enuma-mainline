@@ -1,0 +1,145 @@
+name: enuma-mainline-probe
+
+# Bootable mainline probe for the Xiaomi Pad 5 Pro 5G (enuma, SM8250-AC).
+# Kernel = torvalds tag + armbian's sm8250 patch archive (which carries the
+# enuma device tree authored by Dawid Wrobel), plus a throwaway initramfs that
+# paints colour bands on the panel and forwards the kernel log over USB CDC-ACM.
+# Output is a boot image meant for `fastboot boot`; no partition is written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: kernel tag to build
+        default: v6.19
+        required: false
+        type: string
+      patch_set:
+        description: armbian patch archive directory
+        default: sm8250-6.19
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross \
+            device-tree-compiler cpio gzip xz-utils python3 curl git
+
+      - name: Fetch kernel
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/linux.tar.gz "https://codeload.github.com/torvalds/linux/tar.gz/refs/tags/${{ inputs.kernel_ref }}"
+          mkdir -p src
+          tar -xzf /tmp/linux.tar.gz -C src --strip-components=1
+          head -5 src/Makefile
+
+      - name: Fetch armbian patches and defconfig
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/armbian/build.git /tmp/armbian
+          cd /tmp/armbian
+          git sparse-checkout set "patch/kernel/archive/${{ inputs.patch_set }}" config/kernel
+          echo "patch files: $(ls "patch/kernel/archive/${{ inputs.patch_set }}" | wc -l)"
+
+      - name: Apply patches
+        run: |
+          set -uo pipefail
+          cd src
+          applied=0
+          failed=0
+          for p in /tmp/armbian/patch/kernel/archive/${{ inputs.patch_set }}/*.patch; do
+            if patch -p1 -N --fuzz=3 --batch < "$p" > /tmp/patch.log 2>&1; then
+              applied=$((applied + 1))
+            else
+              echo "::warning::patch failed: $(basename "$p")"
+              tail -3 /tmp/patch.log
+              failed=$((failed + 1))
+            fi
+          done
+          echo "applied=$applied failed=$failed" | tee /tmp/patch-report.txt
+          if [ ! -f arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dts ]; then
+            echo "::error::sm8250-xiaomi-enuma.dts is missing after patching"
+            exit 1
+          fi
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd src
+          cp /tmp/armbian/config/kernel/linux-sm8250-edge.config .config
+          cat ../mainline/config-fragment >> .config
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          grep -E '^CONFIG_(FRAMEBUFFER_CONSOLE|VT|DRM_FBDEV_EMULATION|DRM_CLIENT_DEFAULT_FBDEV|DRM_PANEL_NOVATEK_NT36523|BACKLIGHT_KTZ8866|KERNEL_GZIP|ARCH_QCOM|USB_CONFIGFS_ACM)=' .config | sort | tee /tmp/config-report.txt
+
+      - name: Build probe initramfs
+        run: |
+          set -euo pipefail
+          aarch64-linux-gnu-gcc -std=gnu11 -O2 -Wall -Wextra -static -o /tmp/init mainline/init.c
+          rm -rf /tmp/rootfs
+          mkdir -p /tmp/rootfs/dev /tmp/rootfs/proc /tmp/rootfs/sys
+          cp /tmp/init /tmp/rootfs/init
+          ( cd /tmp/rootfs && find . -print0 | cpio --null -o -H newc --quiet | gzip -9 ) > /tmp/initramfs.cpio.gz
+          ls -l /tmp/initramfs.cpio.gz
+
+      - name: Build kernel and dtbs
+        run: |
+          set -euo pipefail
+          cd src
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)" Image.gz dtbs 2>&1 | tail -30
+          ls -l arch/arm64/boot/Image.gz
+          ls -l arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dtb
+
+      - name: Pack boot image
+        run: |
+          set -euo pipefail
+          cat src/arch/arm64/boot/Image.gz src/arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dtb > /tmp/kernel-dtb
+          python3 mainline/pack-bootimg.py \
+            --kernel /tmp/kernel-dtb \
+            --ramdisk /tmp/initramfs.cpio.gz \
+            --out boot-enuma-mainline.img \
+            --cmdline "" \
+            | tee /tmp/pack-report.txt
+          grep -E '^CONFIG_CMDLINE' src/.config | tee -a /tmp/pack-report.txt
+          dtc -I dtb -O dts src/arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dtb 2>/dev/null | head -14 | tee /tmp/dtb-head.txt
+
+      - name: Collect reports
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp boot-enuma-mainline.img out/
+          cp /tmp/initramfs.cpio.gz out/
+          cp src/arch/arm64/boot/dts/qcom/sm8250-xiaomi-enuma.dtb out/
+          cp /tmp/patch-report.txt /tmp/config-report.txt /tmp/pack-report.txt /tmp/dtb-head.txt out/
+          cp src/.config out/kernel.config
+          ( cd out && sha256sum ./* > SHA256SUMS && cat SHA256SUMS )
+          {
+            echo "## enuma mainline probe"
+            echo
+            echo "kernel: ${{ inputs.kernel_ref }} + armbian ${{ inputs.patch_set }}"
+            echo
+            echo '```'
+            cat /tmp/patch-report.txt /tmp/config-report.txt /tmp/pack-report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: enuma-mainline-boot
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
